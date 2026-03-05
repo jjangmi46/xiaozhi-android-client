@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'dart:math' as math;
+import 'dart:io';
 import 'package:provider/provider.dart';
 import 'package:ai_assistant/providers/theme_provider.dart';
 import 'package:ai_assistant/providers/config_provider.dart';
+import 'package:ai_assistant/providers/server_config_provider.dart';
 import 'package:ai_assistant/models/xiaozhi_config.dart';
 import 'package:ai_assistant/models/dify_config.dart';
+import 'package:ai_assistant/models/server_config.dart';
 import 'package:ai_assistant/widgets/settings_section.dart';
 import 'package:ai_assistant/services/dify_service.dart';
 
@@ -41,7 +44,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     _configProvider = configProvider;
 
     // 初始化选项卡控制器
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _tabController.addListener(() {
       if (_tabController.indexIsChanging) {
         setState(() {
@@ -72,6 +75,34 @@ class _SettingsScreenState extends State<SettingsScreen>
 
   void _updateDifyControllers() {
     // 不再需要此方法，但保留空实现以避免其他地方的调用出错
+  }
+
+  Future<String> _getLocalIpAddress() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLinkLocal: false,
+      );
+      for (final interface in interfaces) {
+        for (final addr in interface.addresses) {
+          // Skip loopback addresses
+          if (!addr.isLoopback && addr.address.startsWith('192.168')) {
+            return addr.address;
+          }
+        }
+      }
+      // Fallback: return first non-loopback IPv4
+      for (final interface in interfaces) {
+        for (final addr in interface.addresses) {
+          if (!addr.isLoopback) {
+            return addr.address;
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error getting IP address: $e');
+    }
+    return '알 수 없음';
   }
 
   @override
@@ -105,6 +136,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                 _buildGeneralTab(),
                 _buildDifyConfigTab(),
                 _buildXiaozhiConfigTab(),
+                _buildAIServerTab(),
               ],
             ),
           ),
@@ -164,7 +196,7 @@ class _SettingsScreenState extends State<SettingsScreen>
             fontWeight: FontWeight.w500,
             fontSize: 16,
           ),
-          tabs: const [Tab(text: '通用'), Tab(text: 'Dify配置'), Tab(text: '小智服务')],
+          tabs: const [Tab(text: '通用'), Tab(text: 'Dify配置'), Tab(text: '小智服务'), Tab(text: 'AI服务器')],
         ),
       ),
     );
@@ -1301,6 +1333,410 @@ class _SettingsScreenState extends State<SettingsScreen>
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildAIServerTab() {
+    return Consumer<ServerConfigProvider>(
+      builder: (context, serverProvider, child) {
+        if (serverProvider.isLoading) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        final config = serverProvider.config;
+
+        return SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Server Status Card
+              _buildCard(
+                title: 'AI 서버 상태',
+                subtitle: '백그라운드 WebSocket 서버 (포트 8000)',
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Container(
+                                width: 12,
+                                height: 12,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: serverProvider.isServerRunning
+                                      ? Colors.green
+                                      : Colors.grey,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Text(
+                                serverProvider.isServerRunning ? '서버 실행 중' : '서버 중지됨',
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                          ElevatedButton(
+                            onPressed: serverProvider.isConfigured
+                                ? () async {
+                                    if (serverProvider.isServerRunning) {
+                                      await serverProvider.stopServer();
+                                    } else {
+                                      await serverProvider.startServer();
+                                    }
+                                  }
+                                : null,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: serverProvider.isServerRunning
+                                  ? Colors.red
+                                  : Colors.green,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 20,
+                                vertical: 12,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                            child: Text(
+                              serverProvider.isServerRunning ? '중지' : '시작',
+                              style: const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (serverProvider.isServerRunning) ...[
+                        const SizedBox(height: 16),
+                        FutureBuilder<String>(
+                          future: _getLocalIpAddress(),
+                          builder: (context, snapshot) {
+                            final ip = snapshot.data ?? '확인 중...';
+                            return Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: Colors.blue.shade50,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: Colors.blue.shade200),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'xiaozhi 연결 주소:',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.black54,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  SelectableText(
+                                    'ws://$ip:8000',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.blue.shade700,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+
+              // Groq API Settings
+              _buildCard(
+                title: 'Groq API',
+                subtitle: 'STT (Whisper) 및 LLM 설정',
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'API Key',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildApiKeyField(
+                        initialValue: config?.groqApiKey ?? '',
+                        hintText: 'Groq API Key 입력',
+                        onSaved: (value) => serverProvider.updateGroqApiKey(value),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'LLM 모델',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildDropdown(
+                        value: config?.llmModel ?? 'llama-3.3-70b-versatile',
+                        items: const [
+                          'llama-3.3-70b-versatile',
+                          'llama-3.1-8b-instant',
+                          'mixtral-8x7b-32768',
+                          'gemma2-9b-it',
+                        ],
+                        onChanged: (value) {
+                          if (value != null) serverProvider.updateLlmModel(value);
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'STT 모델',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildDropdown(
+                        value: config?.sttModel ?? 'whisper-large-v3-turbo',
+                        items: const [
+                          'whisper-large-v3-turbo',
+                          'whisper-large-v3',
+                          'distil-whisper-large-v3-en',
+                        ],
+                        onChanged: (value) {
+                          if (value != null) serverProvider.updateSttModel(value);
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              // Typecast TTS Settings
+              _buildCard(
+                title: 'Typecast TTS',
+                subtitle: '음성 합성 설정',
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'API Key',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildApiKeyField(
+                        initialValue: config?.typecastApiKey ?? '',
+                        hintText: 'Typecast API Key 입력',
+                        onSaved: (value) => serverProvider.updateTypecastApiKey(value),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Voice ID',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildTextField(
+                        initialValue: config?.ttsVoiceId ?? 'default',
+                        hintText: 'Voice ID 입력',
+                        onChanged: (value) => serverProvider.updateTtsVoiceId(value),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              // mem0 Memory Settings
+              _buildCard(
+                title: 'mem0 (선택사항)',
+                subtitle: '대화 기억 관리',
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'API Key',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildApiKeyField(
+                        initialValue: config?.mem0ApiKey ?? '',
+                        hintText: 'mem0 API Key (선택사항)',
+                        onSaved: (value) => serverProvider.updateMem0ApiKey(value),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              // System Prompt
+              _buildCard(
+                title: '시스템 프롬프트',
+                subtitle: 'AI 어시스턴트 성격 설정',
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.grey.shade300),
+                        ),
+                        child: TextField(
+                          maxLines: 4,
+                          controller: TextEditingController(
+                            text: config?.systemPrompt ?? '',
+                          ),
+                          decoration: InputDecoration(
+                            hintText: 'AI 어시스턴트의 성격과 행동을 설정하세요...',
+                            hintStyle: TextStyle(color: Colors.grey.shade400),
+                            contentPadding: const EdgeInsets.all(16),
+                            border: InputBorder.none,
+                          ),
+                          onChanged: (value) => serverProvider.updateSystemPrompt(value),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildApiKeyField({
+    required String initialValue,
+    required String hintText,
+    required Function(String) onSaved,
+  }) {
+    final controller = TextEditingController(text: initialValue);
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: controller,
+              obscureText: true,
+              decoration: InputDecoration(
+                hintText: hintText,
+                hintStyle: TextStyle(color: Colors.grey.shade400),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+                border: InputBorder.none,
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.save, color: Colors.black54),
+            onPressed: () {
+              onSaved(controller.text.trim());
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: const Text('저장되었습니다'),
+                  backgroundColor: Colors.green.shade600,
+                  behavior: SnackBarBehavior.floating,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  margin: const EdgeInsets.all(10),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTextField({
+    required String initialValue,
+    required String hintText,
+    required Function(String) onChanged,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: TextField(
+        controller: TextEditingController(text: initialValue),
+        decoration: InputDecoration(
+          hintText: hintText,
+          hintStyle: TextStyle(color: Colors.grey.shade400),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 14,
+          ),
+          border: InputBorder.none,
+        ),
+        onChanged: onChanged,
+      ),
+    );
+  }
+
+  Widget _buildDropdown({
+    required String value,
+    required List<String> items,
+    required Function(String?) onChanged,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: DropdownButton<String>(
+        value: items.contains(value) ? value : items.first,
+        isExpanded: true,
+        underline: const SizedBox(),
+        items: items.map((item) {
+          return DropdownMenuItem(
+            value: item,
+            child: Text(item),
+          );
+        }).toList(),
+        onChanged: onChanged,
       ),
     );
   }

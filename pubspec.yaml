@@ -28,6 +28,13 @@ environment:
 # the latest version available on pub.dev. To see which dependencies have newer
 # versions available, run `flutter pub outdated`.
 dependencies:
+  flutter_background_service: ^5.1.0
+  shelf: ^1.4.2
+  shelf_web_socket: ^3.0.0
+  flutter_secure_storage: ^10.0.0
+  # just_audio: ^0.x        # for playing TTS audio back
+  # permission_handler: ^11.x
+
   flutter:
     sdk: flutter
 
