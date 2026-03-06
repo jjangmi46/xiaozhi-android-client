@@ -555,7 +555,12 @@ class XiaozhiService {
       case XiaozhiEventType.binaryMessage:
         // 处理二进制音频数据 - 简化直接播放
         final audioData = event.data as List<int>;
-        AudioUtil.playOpusData(Uint8List.fromList(audioData));
+        if (AudioUtil.isPcmMode) {
+          AudioUtil.playPcmData(Uint8List.fromList(audioData));
+        } else {
+          AudioUtil.playOpusData(Uint8List.fromList(audioData));
+        }
+
         break;
 
       case XiaozhiEventType.error:
@@ -572,7 +577,11 @@ class XiaozhiService {
       if (message is String) {
         _handleTextMessage(message);
       } else if (message is List<int>) {
-        AudioUtil.playOpusData(Uint8List.fromList(message));
+        if (AudioUtil.isPcmMode) {
+          AudioUtil.playPcmData(Uint8List.fromList(message));
+        } else {
+          AudioUtil.playOpusData(Uint8List.fromList(message));
+        }
       }
     } catch (e) {
       print('$TAG: 处理消息失败: $e');
@@ -619,12 +628,28 @@ class XiaozhiService {
           // TTS消息处理
           final String state = jsonData['state'] ?? '';
           final String text = jsonData['text'] ?? '';
+          final String format =
+              jsonData['format'] ?? ''; // <--- 1. Extract format
 
-          if (state == 'sentence_start' && text.isNotEmpty) {
-            print('$TAG: 收到TTS句子: $text');
-            _dispatchEvent(
-              XiaozhiServiceEvent(XiaozhiServiceEventType.textMessage, text),
-            );
+          if (state == 'sentence_start') {
+            // 2. Set the audio mode based on the format
+            if (format == 'pcm') {
+              AudioUtil.isPcmMode = true;
+              print('$TAG: 切换到 PCM 播放模式 (Switched to PCM)');
+            } else {
+              AudioUtil.isPcmMode = false;
+              print('$TAG: 切换到 Opus 播放模式 (Switched to Opus)');
+            }
+
+            if (text.isNotEmpty) {
+              print('$TAG: 收到TTS句子: $text');
+              _dispatchEvent(
+                XiaozhiServiceEvent(XiaozhiServiceEventType.textMessage, text),
+              );
+            }
+          } else if (state == 'stop') {
+            // Optional: Reset back to Opus when TTS is fully done
+            AudioUtil.isPcmMode = false;
           }
           break;
 

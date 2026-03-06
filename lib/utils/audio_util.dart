@@ -13,6 +13,8 @@ import 'package:flutter_pcm_player/flutter_pcm_player.dart';
 
 /// 音频工具类，用于处理Opus音频编解码和录制播放
 class AudioUtil {
+  static bool isPcmMode = false;
+
   static const String TAG = "AudioUtil";
   static const int SAMPLE_RATE = 16000;
   static const int CHANNELS = 1;
@@ -128,7 +130,7 @@ class AudioUtil {
     print('$TAG: 录音器初始化成功');
   }
 
-  /// 初始化音频播放器
+  /// 初始化音频播放器 오디오 플레이어 초기화
   static Future<void> initPlayer() async {
     // 确保任何旧播放器被释放
     await stopPlaying();
@@ -149,10 +151,10 @@ class AudioUtil {
     }
   }
 
-  /// 播放Opus音频数据
+  /// 播放Opus音频数据 Opus 오디오 데이터 재생
   static Future<void> playOpusData(Uint8List opusData) async {
     try {
-      // 如果播放器未初始化，先初始化
+      // 如果播放器未初始化，先初始化 플레이어가 초기화되지 않은 경우 먼저 초기화하세요.
       if (!_isPlayerInitialized || _pcmPlayer == null) {
         await initPlayer();
       }
@@ -160,7 +162,7 @@ class AudioUtil {
       // 解码Opus数据
       final Int16List pcmData = _decoder.decode(input: opusData);
 
-      // 准备PCM数据（按照示例直接方式）
+      // 准备PCM数据（按照示例直接方式） PCM 데이터 준비(예제를 직접 따르세요)
       final Uint8List pcmBytes = Uint8List(pcmData.length * 2);
       ByteData bytes = ByteData.view(pcmBytes.buffer);
 
@@ -182,7 +184,26 @@ class AudioUtil {
     }
   }
 
-  /// 停止播放
+  /// 播放原始PCM音频数据 (Play raw PCM audio data directly)
+  static Future<void> playPcmData(Uint8List pcmBytes) async {
+    try {
+      // 1. Ensure player is initialized
+      if (!_isPlayerInitialized || _pcmPlayer == null) {
+        await initPlayer();
+      }
+
+      // 2. Feed the raw PCM bytes directly to the player!
+      if (_pcmPlayer != null) {
+        await _pcmPlayer!.feed(pcmBytes);
+      }
+    } catch (e) {
+      print('$TAG: PCM播放失败: $e');
+      await stopPlaying();
+      await initPlayer();
+    }
+  }
+
+  /// 停止播放 재생 중지
   static Future<void> stopPlaying() async {
     if (_pcmPlayer != null) {
       try {
@@ -291,7 +312,7 @@ class AudioUtil {
     }
   }
 
-  /// 将PCM数据编码为Opus格式
+  /// 将PCM数据编码为Opus格式 PCM 데이터를 Opus 형식으로 인코딩
   static Future<Uint8List?> encodeToOpus(Uint8List pcmData) async {
     try {
       // 删除频繁日志

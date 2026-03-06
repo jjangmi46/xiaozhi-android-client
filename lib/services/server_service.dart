@@ -491,13 +491,12 @@ void _onStart(ServiceInstance service) async {
         // Convert the 44.1kHz WAV to 16kHz PCM
         Uint8List pcm16kBytes = convertWavTo16kPcm(response.bodyBytes);
 
-        // Send the converted raw PCM audio
+        // REMOVE THE CHUNKING LOOP! Send it all at once.
         sendAudioToClient(session, pcm16kBytes);
         debugPrint(
           '$tag: Sent Typecast audio to client (${pcm16kBytes.length} bytes)',
         );
       } else {
-        // Print the exact error if it fails
         debugPrint(
           '$tag: Typecast API error: ${response.statusCode} - ${response.body}',
         );
@@ -597,6 +596,10 @@ void _onStart(ServiceInstance service) async {
                       'sample_rate': 16000, // <--- ADD THIS
                     });
 
+                    // 🛑 ADD THIS DELAY!
+                    // Gives the client time to init the PCM player before binary arrives
+                    await Future.delayed(const Duration(milliseconds: 100));
+
                     // Convert to speech and send audio
                     await textToSpeech(session, completeSentence, config!);
                   }
@@ -620,6 +623,11 @@ void _onStart(ServiceInstance service) async {
           'format': 'pcm', // <--- ADD THIS
           'sample_rate': 16000, // <--- ADD THIS
         });
+
+        // 🛑 ADD THIS DELAY!
+        // Gives the client time to init the PCM player before binary arrives
+        await Future.delayed(const Duration(milliseconds: 100));
+
         await textToSpeech(session, remaining, config!);
       }
 
