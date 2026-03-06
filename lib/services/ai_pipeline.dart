@@ -29,11 +29,7 @@ class AIPipeline {
   final List<int> _audioBuffer = [];
   bool _isProcessing = false;
 
-  AIPipeline({
-    required this.config,
-    required this.onAudioChunk,
-    this.onText,
-  });
+  AIPipeline({required this.config, required this.onAudioChunk, this.onText});
 
   /// Process incoming audio data from the device
   /// Accumulates audio frames until processing is triggered
@@ -73,7 +69,6 @@ class AIPipeline {
 
       // Step 4: Store the interaction in mem0
       await _storeMemory(transcript);
-
     } catch (e) {
       debugPrint('$TAG: Error processing audio: $e');
     } finally {
@@ -99,7 +94,6 @@ class AIPipeline {
 
       // Step 3: Store memory
       await _storeMemory(text);
-
     } catch (e) {
       debugPrint('$TAG: Error processing text: $e');
     } finally {
@@ -110,18 +104,22 @@ class AIPipeline {
   /// Transcribe audio using Groq Whisper API
   Future<String> _transcribeAudio(Uint8List audioData) async {
     try {
-      final uri = Uri.parse('https://api.groq.com/openai/v1/audio/transcriptions');
+      final uri = Uri.parse(
+        'https://api.groq.com/openai/v1/audio/transcriptions',
+      );
 
       final request = http.MultipartRequest('POST', uri);
       request.headers['Authorization'] = 'Bearer ${config.groqApiKey}';
 
       // Add the audio file
-      request.files.add(http.MultipartFile.fromBytes(
-        'file',
-        audioData,
-        filename: 'audio.opus',
-        contentType: MediaType('audio', 'opus'),
-      ));
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'file',
+          audioData,
+          filename: 'audio.opus',
+          contentType: MediaType('audio', 'opus'),
+        ),
+      );
 
       request.fields['model'] = config.sttModel;
       request.fields['language'] = 'ko'; // Korean, adjust as needed
@@ -134,7 +132,9 @@ class AIPipeline {
         final json = jsonDecode(response.body);
         return json['text'] ?? '';
       } else {
-        debugPrint('$TAG: STT error: ${response.statusCode} - ${response.body}');
+        debugPrint(
+          '$TAG: STT error: ${response.statusCode} - ${response.body}',
+        );
         return '';
       }
     } catch (e) {
@@ -166,7 +166,9 @@ class AIPipeline {
       if (response.statusCode == 200) {
         final json = jsonDecode(response.body);
         final results = json['results'] as List? ?? [];
-        return results.map<String>((m) => m['memory'] as String? ?? '').toList();
+        return results
+            .map<String>((m) => m['memory'] as String? ?? '')
+            .toList();
       } else {
         debugPrint('$TAG: mem0 search error: ${response.statusCode}');
         return [];
@@ -204,12 +206,16 @@ class AIPipeline {
   }
 
   /// Generate LLM response using Groq with streaming
-  Future<void> _generateResponse(String userMessage, List<String> memories) async {
+  Future<void> _generateResponse(
+    String userMessage,
+    List<String> memories,
+  ) async {
     // Build messages for LLM
     final messages = <Map<String, String>>[];
 
     // System prompt with memories
-    String systemPrompt = config.systemPrompt ??
+    String systemPrompt =
+        config.systemPrompt ??
         'You are a helpful AI assistant. Respond naturally and concisely.';
 
     if (memories.isNotEmpty) {
@@ -249,7 +255,9 @@ class AIPipeline {
       final StringBuffer fullResponse = StringBuffer();
       final StringBuffer sentenceBuffer = StringBuffer();
 
-      await for (final chunk in streamedResponse.stream.transform(utf8.decoder)) {
+      await for (final chunk in streamedResponse.stream.transform(
+        utf8.decoder,
+      )) {
         // Parse SSE format
         for (final line in chunk.split('\n')) {
           if (line.startsWith('data: ')) {
@@ -292,13 +300,15 @@ class AIPipeline {
 
       // Store assistant response in history
       final assistantResponse = fullResponse.toString();
-      _conversationHistory.add({'role': 'assistant', 'content': assistantResponse});
+      _conversationHistory.add({
+        'role': 'assistant',
+        'content': assistantResponse,
+      });
 
       // Keep history manageable
       while (_conversationHistory.length > 20) {
         _conversationHistory.removeAt(0);
       }
-
     } catch (e) {
       debugPrint('$TAG: LLM exception: $e');
     }
@@ -316,10 +326,14 @@ class AIPipeline {
 
   /// Convert text to speech using Typecast API
   Future<void> _textToSpeech(String text) async {
-    if (text.isEmpty || config.typecastApiKey.isEmpty) return;
+    // 1. Silent abort if missing key
+    if (text.isEmpty || config.typecastApiKey.isEmpty) {
+      debugPrint('$TAG: TTS skipped: Empty text or missing Typecast API key.');
+      return;
+    }
 
     try {
-      // Typecast API endpoint
+      // Step 1: Request Speech Synthesis Job
       final uri = Uri.parse('https://typecast.ai/api/speak');
 
       final response = await http.post(
@@ -330,33 +344,81 @@ class AIPipeline {
         },
         body: jsonEncode({
           'text': text,
-          'voice_id': config.ttsVoiceId,
-          'format': 'opus', // Request opus format for xiaozhi compatibility
+          'actor_id':
+              config
+                  .ttsVoiceId, // Fix: Typecast requires 'actor_id', NOT 'voice_id'
+          'lang': 'auto',
+          'xapi_hd': true,
+          // Kept for your app's compatibility, though Typecast defaults to wav/mp3
+          'format': 'opus',
           'sample_rate': 16000,
         }),
       );
 
-      if (response.statusCode == 200) {
-        // Check if response is audio data or JSON with URL
-        final contentType = response.headers['content-type'] ?? '';
+      if (response.statusCode != 200) {
+        debugPrint(
+          '$TAG: Typecast API error: ${response.statusCode} - ${response.body}',
+        );
+        return;
+      }
 
-        if (contentType.contains('audio')) {
-          // Direct audio response
-          onAudioChunk(response.bodyBytes);
-        } else {
-          // JSON response with audio URL
-          final json = jsonDecode(response.body);
-          final audioUrl = json['audio_url'] ?? json['url'];
+      final json = jsonDecode(response.body);
+      final speakUrl =
+          json['result']?['speak_v2_url']; // Fix: Get the polling URL
 
-          if (audioUrl != null) {
-            final audioResponse = await http.get(Uri.parse(audioUrl));
-            if (audioResponse.statusCode == 200) {
-              onAudioChunk(audioResponse.bodyBytes);
-            }
+      if (speakUrl == null) {
+        debugPrint('$TAG: Failed to get speak_v2_url from Typecast response');
+        return;
+      }
+
+      // Step 2: Poll the Job Status
+      String? audioDownloadUrl;
+      int maxRetries = 30; // 30 seconds timeout limit
+
+      for (int i = 0; i < maxRetries; i++) {
+        // Wait 1 second between checks so we don't spam the API
+        await Future.delayed(const Duration(seconds: 1));
+
+        final pollResponse = await http.get(
+          Uri.parse(speakUrl),
+          headers: {'Authorization': 'Bearer ${config.typecastApiKey}'},
+        );
+
+        if (pollResponse.statusCode == 200) {
+          final pollJson = jsonDecode(pollResponse.body);
+          final status = pollJson['result']?['status'];
+
+          if (status == 'done') {
+            audioDownloadUrl = pollJson['result']?['audio_download_url'];
+            break; // The audio is ready! Exit the loop.
+          } else if (status == 'failed') {
+            debugPrint(
+              '$TAG: Typecast synthesis failed internally on their server.',
+            );
+            return;
           }
+          // If status is 'progress' or 'waiting', the loop continues automatically
+        } else {
+          debugPrint(
+            '$TAG: Typecast polling error: ${pollResponse.statusCode}',
+          );
+          return;
         }
+      }
+
+      if (audioDownloadUrl == null) {
+        debugPrint('$TAG: Typecast polling timed out after 30 seconds.');
+        return;
+      }
+
+      // Step 3: Download the generated audio file
+      final audioResponse = await http.get(Uri.parse(audioDownloadUrl));
+      if (audioResponse.statusCode == 200) {
+        onAudioChunk(audioResponse.bodyBytes);
       } else {
-        debugPrint('$TAG: TTS error: ${response.statusCode} - ${response.body}');
+        debugPrint(
+          '$TAG: Failed to download final audio: ${audioResponse.statusCode}',
+        );
       }
     } catch (e) {
       debugPrint('$TAG: TTS exception: $e');

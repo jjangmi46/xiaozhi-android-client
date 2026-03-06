@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:opus_dart/opus_dart.dart';
+import 'package:opus_flutter/opus_flutter.dart' as opus_flutter;
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
@@ -14,11 +17,11 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/server_config.dart';
 
-/// Background server service that runs a WebSocket server on port 8080
+/// Background server service that runs a WebSocket server on port 8000
 /// Handles xiaozhi device connections and AI pipeline processing
 class ServerService {
   static const String tag = "ServerService";
-  static const int defaultPort = 8080;
+  static const int defaultPort = 8000;
 
   static final ServerService _instance = ServerService._internal();
   factory ServerService() => _instance;
@@ -105,11 +108,22 @@ Future<bool> _onIosBackground(ServiceInstance service) async {
 class _ClientSession {
   final WebSocketChannel webSocket;
   final String sessionId;
-  final List<int> audioBuffer = [];
+  final List<List<int>> audioFrames = []; // Store individual Opus frames
   bool isListening = false;
   String? deviceId;
 
   _ClientSession({required this.webSocket, required this.sessionId});
+
+  void addAudioFrame(List<int> frame) {
+    audioFrames.add(List<int>.from(frame));
+  }
+
+  void clearAudio() {
+    audioFrames.clear();
+  }
+
+  int get totalAudioBytes =>
+      audioFrames.fold(0, (sum, frame) => sum + frame.length);
 }
 
 // Main service entry point - runs in a separate isolate
@@ -124,6 +138,14 @@ void _onStart(ServiceInstance service) async {
   final uuid = const Uuid();
 
   debugPrint('$tag: Service isolate started');
+
+  // Initialize opus_dart in this isolate
+  try {
+    initOpus(await opus_flutter.load());
+    debugPrint('$tag: Opus initialized successfully');
+  } catch (e) {
+    debugPrint('$tag: Failed to initialize Opus: $e');
+  }
 
   // Handle config updates
   service.on('config').listen((event) {
@@ -162,36 +184,140 @@ void _onStart(ServiceInstance service) async {
     }
   }
 
-  /// Transcribe audio using Groq Whisper
-  Future<String> transcribeAudio(List<int> audioData) async {
+  // Opus decoder for converting Opus frames to PCM
+  final opusDecoder = SimpleOpusDecoder(sampleRate: 16000, channels: 1);
+
+  /// Decode individual Opus frames to PCM samples
+  List<int> decodeOpusFramesToPcm(List<List<int>> frames) {
+    final List<int> pcmSamples = [];
+    int successCount = 0;
+    int failCount = 0;
+
+    for (final frame in frames) {
+      try {
+        final input = Uint8List.fromList(frame);
+        final decoded = opusDecoder.decode(input: input);
+
+        // Convert Int16List to bytes (little-endian)
+        for (int sample in decoded) {
+          pcmSamples.add(sample & 0xFF);
+          pcmSamples.add((sample >> 8) & 0xFF);
+        }
+        successCount++;
+      } catch (e) {
+        failCount++;
+        // Skip failed frames
+      }
+    }
+
+    debugPrint('$tag: Decoded $successCount frames, failed $failCount');
+    return pcmSamples;
+  }
+
+  /// Create WAV file header
+  Uint8List createWavHeader(int pcmDataLength) {
+    const int sampleRate = 16000;
+    const int channels = 1;
+    const int bitsPerSample = 16;
+    final int byteRate = sampleRate * channels * bitsPerSample ~/ 8;
+    final int blockAlign = channels * bitsPerSample ~/ 8;
+
+    final header = ByteData(44);
+
+    // RIFF header
+    header.setUint8(0, 0x52); // 'R'
+    header.setUint8(1, 0x49); // 'I'
+    header.setUint8(2, 0x46); // 'F'
+    header.setUint8(3, 0x46); // 'F'
+    header.setUint32(4, 36 + pcmDataLength, Endian.little); // File size - 8
+    header.setUint8(8, 0x57); // 'W'
+    header.setUint8(9, 0x41); // 'A'
+    header.setUint8(10, 0x56); // 'V'
+    header.setUint8(11, 0x45); // 'E'
+
+    // fmt chunk
+    header.setUint8(12, 0x66); // 'f'
+    header.setUint8(13, 0x6D); // 'm'
+    header.setUint8(14, 0x74); // 't'
+    header.setUint8(15, 0x20); // ' '
+    header.setUint32(16, 16, Endian.little); // Chunk size
+    header.setUint16(20, 1, Endian.little); // Audio format (PCM)
+    header.setUint16(22, channels, Endian.little);
+    header.setUint32(24, sampleRate, Endian.little);
+    header.setUint32(28, byteRate, Endian.little);
+    header.setUint16(32, blockAlign, Endian.little);
+    header.setUint16(34, bitsPerSample, Endian.little);
+
+    // data chunk
+    header.setUint8(36, 0x64); // 'd'
+    header.setUint8(37, 0x61); // 'a'
+    header.setUint8(38, 0x74); // 't'
+    header.setUint8(39, 0x61); // 'a'
+    header.setUint32(40, pcmDataLength, Endian.little);
+
+    return header.buffer.asUint8List();
+  }
+
+  /// Transcribe audio frames using Groq Whisper
+  Future<String> transcribeAudioFrames(List<List<int>> frames) async {
     if (config == null || config!.groqApiKey.isEmpty) {
       debugPrint('$tag: No Groq API key configured');
       return '';
     }
 
     try {
-      final uri = Uri.parse('https://api.groq.com/openai/v1/audio/transcriptions');
+      // Decode Opus frames to PCM
+      debugPrint('$tag: Decoding ${frames.length} Opus frames');
+      final pcmData = decodeOpusFramesToPcm(frames);
+
+      if (pcmData.isEmpty) {
+        debugPrint('$tag: Failed to decode Opus audio');
+        return '';
+      }
+
+      debugPrint('$tag: Decoded to ${pcmData.length} bytes of PCM');
+
+      // Create WAV file
+      final wavHeader = createWavHeader(pcmData.length);
+      final wavData = Uint8List(wavHeader.length + pcmData.length);
+      wavData.setAll(0, wavHeader);
+      wavData.setAll(wavHeader.length, pcmData);
+
+      debugPrint('$tag: Created WAV file: ${wavData.length} bytes');
+
+      final uri = Uri.parse(
+        'https://api.groq.com/openai/v1/audio/transcriptions',
+      );
       final request = http.MultipartRequest('POST', uri);
       request.headers['Authorization'] = 'Bearer ${config!.groqApiKey}';
 
-      request.files.add(http.MultipartFile.fromBytes(
-        'file',
-        audioData,
-        filename: 'audio.opus',
-        contentType: MediaType('audio', 'opus'),
-      ));
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'file',
+          wavData,
+          filename: 'audio.wav',
+          contentType: MediaType('audio', 'wav'),
+        ),
+      );
 
       request.fields['model'] = config!.sttModel;
       request.fields['response_format'] = 'json';
+      request.fields['language'] = 'ko'; // Korean
+
+      debugPrint('$tag: Sending ${wavData.length} bytes to Groq STT');
 
       final streamedResponse = await request.send();
       final response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 200) {
-        final json = jsonDecode(response.body);
+        // Explicitly decode as UTF-8 to handle Korean text properly
+        final responseBody = utf8.decode(response.bodyBytes);
+        final json = jsonDecode(responseBody);
+        debugPrint('$tag: STT success: ${json['text']}');
         return json['text'] ?? '';
       } else {
-        debugPrint('$tag: STT error: ${response.statusCode}');
+        final errorBody = utf8.decode(response.bodyBytes);
+        debugPrint('$tag: STT error: ${response.statusCode} - $errorBody');
         return '';
       }
     } catch (e) {
@@ -221,7 +347,9 @@ void _onStart(ServiceInstance service) async {
       if (response.statusCode == 200) {
         final json = jsonDecode(response.body);
         final results = json['results'] as List? ?? [];
-        return results.map<String>((m) => m['memory'] as String? ?? '').toList();
+        return results
+            .map<String>((m) => m['memory'] as String? ?? '')
+            .toList();
       }
     } catch (e) {
       debugPrint('$tag: mem0 exception: $e');
@@ -237,48 +365,162 @@ void _onStart(ServiceInstance service) async {
     return '.!?。！？'.contains(lastChar);
   }
 
+  // Opus encoder for TTS output
+  final opusEncoder = SimpleOpusEncoder(
+    sampleRate: 24000, // EdgeTTS outputs 24kHz
+    channels: 1,
+    application: Application.audio,
+  );
+
+  /// Find the end of WebSocket message header (must be declared before use)
+  int findHeaderEnd(List<int> data) {
+    // Look for \r\n\r\n pattern
+    for (int i = 0; i < data.length - 4; i++) {
+      if (data[i] == 0x0D &&
+          data[i + 1] == 0x0A &&
+          data[i + 2] == 0x0D &&
+          data[i + 3] == 0x0A) {
+        return i + 4;
+      }
+    }
+    // Fallback: skip first 2 bytes (length) + header
+    if (data.length > 2) {
+      final headerLen = (data[0] << 8) | data[1];
+      if (headerLen + 2 < data.length) {
+        return headerLen + 2;
+      }
+    }
+    return -1;
+  }
+
+  /// Convert PCM to Opus frames and send to client
+  void sendPcmAsOpus(_ClientSession session, List<int> pcmData) {
+    // 60ms frame at 24kHz = 1440 samples = 2880 bytes (16-bit)
+    const int frameSize = 1440;
+    const int bytesPerFrame = frameSize * 2;
+
+    int offset = 0;
+    int frameCount = 0;
+    while (offset + bytesPerFrame <= pcmData.length) {
+      // Convert bytes to Int16List
+      final frameBytes = pcmData.sublist(offset, offset + bytesPerFrame);
+      final Int16List samples = Int16List(frameSize);
+      for (int i = 0; i < frameSize; i++) {
+        samples[i] = (frameBytes[i * 2]) | (frameBytes[i * 2 + 1] << 8);
+      }
+
+      try {
+        final encoded = opusEncoder.encode(input: samples);
+        sendAudioToClient(session, encoded);
+        frameCount++;
+      } catch (e) {
+        debugPrint('$tag: Opus encode error: $e');
+      }
+
+      offset += bytesPerFrame;
+    }
+    debugPrint('$tag: Sent $frameCount Opus frames');
+  }
+
+  /// Convert 44.1kHz WAV from Typecast to 16kHz raw PCM
+  Uint8List convertWavTo16kPcm(Uint8List wavBytes) {
+    int dataOffset = 44; // Default WAV data offset
+
+    // Safely find the 'data' chunk header
+    for (int i = 12; i < wavBytes.length - 4; i++) {
+      if (wavBytes[i] == 100 &&
+          wavBytes[i + 1] == 97 &&
+          wavBytes[i + 2] == 116 &&
+          wavBytes[i + 3] == 97) {
+        dataOffset = i + 8;
+        break;
+      }
+    }
+
+    ByteData byteData = ByteData.view(wavBytes.buffer, wavBytes.offsetInBytes);
+    int numSamples = (wavBytes.length - dataOffset) ~/ 2;
+
+    // Downsample ratio (44100 -> 16000)
+    double ratio = 44100 / 16000;
+    int outLen = (numSamples / ratio).ceil();
+
+    Uint8List outBytes = Uint8List(outLen * 2);
+    ByteData outData = ByteData.view(outBytes.buffer);
+
+    // Fast downsample
+    for (int i = 0; i < outLen; i++) {
+      int inIndex = (i * ratio).round();
+      if (inIndex >= numSamples) inIndex = numSamples - 1;
+
+      int sample = byteData.getInt16(dataOffset + inIndex * 2, Endian.little);
+      outData.setInt16(i * 2, sample, Endian.little);
+    }
+    return outBytes;
+  }
+
   /// Convert text to speech using Typecast
+  Future<void> textToSpeechTypecast(
+    _ClientSession session,
+    String text,
+    ServerConfig cfg,
+  ) async {
+    if (text.isEmpty || cfg.typecastApiKey.isEmpty) {
+      debugPrint('$tag: Typecast skipped: Empty text or missing API key.');
+      return;
+    }
+
+    try {
+      // Step 1: Request Speech Synthesis using the OFFICIAL Developer API
+      final response = await http.post(
+        Uri.parse('https://api.typecast.ai/v1/text-to-speech'),
+        headers: {
+          'X-API-KEY': cfg.typecastApiKey, // Official Header format
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'text': text,
+          'voice_id':
+              cfg.ttsVoiceId, // Note: Must start with 'tc_' (e.g., tc_60e5426de...)
+          'model':
+              'ssfm-v21', // You can change this to 'ssfm-v21' if you prefer
+        }),
+      );
+
+      // Step 2: Handle the Response
+      if (response.statusCode == 200) {
+        // Convert the 44.1kHz WAV to 16kHz PCM
+        Uint8List pcm16kBytes = convertWavTo16kPcm(response.bodyBytes);
+
+        // Send the converted raw PCM audio
+        sendAudioToClient(session, pcm16kBytes);
+        debugPrint(
+          '$tag: Sent Typecast audio to client (${pcm16kBytes.length} bytes)',
+        );
+      } else {
+        // Print the exact error if it fails
+        debugPrint(
+          '$tag: Typecast API error: ${response.statusCode} - ${response.body}',
+        );
+      }
+    } catch (e) {
+      debugPrint('$tag: Typecast TTS exception: $e');
+    }
+  }
+
+  /// Main TTS dispatcher based on provider
   Future<void> textToSpeech(
     _ClientSession session,
     String text,
     ServerConfig cfg,
   ) async {
-    if (text.isEmpty || cfg.typecastApiKey.isEmpty) return;
+    if (text.isEmpty) return;
 
-    try {
-      final response = await http.post(
-        Uri.parse('https://typecast.ai/api/speak'),
-        headers: {
-          'Authorization': 'Bearer ${cfg.typecastApiKey}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'text': text,
-          'voice_id': cfg.ttsVoiceId,
-          'format': 'opus',
-          'sample_rate': 16000,
-        }),
-      );
+    debugPrint('$tag: TTS provider: ${cfg.ttsProvider}, text: $text');
 
-      if (response.statusCode == 200) {
-        final contentType = response.headers['content-type'] ?? '';
-
-        if (contentType.contains('audio')) {
-          sendAudioToClient(session, response.bodyBytes);
-        } else {
-          // JSON with audio URL
-          final json = jsonDecode(response.body);
-          final audioUrl = json['audio_url'] ?? json['url'];
-          if (audioUrl != null) {
-            final audioResponse = await http.get(Uri.parse(audioUrl));
-            if (audioResponse.statusCode == 200) {
-              sendAudioToClient(session, audioResponse.bodyBytes);
-            }
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('$tag: TTS exception: $e');
+    switch (cfg.ttsProvider) {
+      case 'typecast':
+        await textToSpeechTypecast(session, text, cfg);
+        break;
     }
   }
 
@@ -291,7 +533,8 @@ void _onStart(ServiceInstance service) async {
     if (config == null) return;
 
     // Build system prompt
-    String systemPrompt = config!.systemPrompt ??
+    String systemPrompt =
+        config!.systemPrompt ??
         'You are a helpful AI assistant. Respond naturally and concisely in Korean.';
 
     if (memories.isNotEmpty) {
@@ -326,7 +569,9 @@ void _onStart(ServiceInstance service) async {
       final StringBuffer sentenceBuffer = StringBuffer();
       final StringBuffer fullResponse = StringBuffer();
 
-      await for (final chunk in streamedResponse.stream.transform(utf8.decoder)) {
+      await for (final chunk in streamedResponse.stream.transform(
+        utf8.decoder,
+      )) {
         for (final line in chunk.split('\n')) {
           if (line.startsWith('data: ')) {
             final data = line.substring(6);
@@ -348,6 +593,8 @@ void _onStart(ServiceInstance service) async {
                       'type': 'tts',
                       'state': 'sentence_start',
                       'text': completeSentence,
+                      'format': 'pcm', // <--- ADD THIS
+                      'sample_rate': 16000, // <--- ADD THIS
                     });
 
                     // Convert to speech and send audio
@@ -370,16 +617,14 @@ void _onStart(ServiceInstance service) async {
           'type': 'tts',
           'state': 'sentence_start',
           'text': remaining,
+          'format': 'pcm', // <--- ADD THIS
+          'sample_rate': 16000, // <--- ADD THIS
         });
         await textToSpeech(session, remaining, config!);
       }
 
       // Send TTS stop message
-      sendToClient(session, {
-        'type': 'tts',
-        'state': 'stop',
-      });
-
+      sendToClient(session, {'type': 'tts', 'state': 'stop'});
     } catch (e) {
       debugPrint('$tag: LLM exception: $e');
     }
@@ -387,15 +632,15 @@ void _onStart(ServiceInstance service) async {
 
   /// Process audio from client
   Future<void> processClientAudio(_ClientSession session) async {
-    if (session.audioBuffer.isEmpty) return;
+    if (session.audioFrames.isEmpty) return;
 
-    final audioData = List<int>.from(session.audioBuffer);
-    session.audioBuffer.clear();
+    final frames = List<List<int>>.from(session.audioFrames);
+    session.clearAudio();
 
-    debugPrint('$tag: Processing ${audioData.length} bytes of audio');
+    debugPrint('$tag: Processing ${frames.length} frames');
 
     // Transcribe
-    final transcript = await transcribeAudio(audioData);
+    final transcript = await transcribeAudioFrames(frames);
     if (transcript.isEmpty) {
       debugPrint('$tag: Empty transcript');
       return;
@@ -404,10 +649,7 @@ void _onStart(ServiceInstance service) async {
     debugPrint('$tag: Transcript: $transcript');
 
     // Send STT result to client
-    sendToClient(session, {
-      'type': 'stt',
-      'text': transcript,
-    });
+    sendToClient(session, {'type': 'stt', 'text': transcript});
 
     // Emit event to main isolate
     service.invoke('event', {
@@ -425,15 +667,23 @@ void _onStart(ServiceInstance service) async {
 
   /// Handle incoming xiaozhi protocol messages
   void handleMessage(_ClientSession session, dynamic message) async {
+    // Handle binary audio data (can be List<int> or Uint8List)
     if (message is List<int>) {
-      // Binary audio data
       if (session.isListening) {
-        session.audioBuffer.addAll(message);
+        session.addAudioFrame(message);
+        debugPrint(
+          '$tag: Received frame ${session.audioFrames.length}: ${message.length} bytes',
+        );
+      } else {
+        debugPrint('$tag: Received audio but not listening, ignoring');
       }
       return;
     }
 
-    if (message is! String) return;
+    if (message is! String) {
+      debugPrint('$tag: Received unknown message type: ${message.runtimeType}');
+      return;
+    }
 
     try {
       final json = jsonDecode(message);
@@ -461,21 +711,17 @@ void _onStart(ServiceInstance service) async {
 
         case 'listen':
           final state = json['state'] as String?;
+          debugPrint('$tag: Listen state: $state');
           if (state == 'start') {
             session.isListening = true;
-            session.audioBuffer.clear();
-            sendToClient(session, {
-              'type': 'listen',
-              'state': 'start',
-              'session_id': session.sessionId,
-            });
+            session.clearAudio();
+            // Don't echo back - device doesn't expect it
+            debugPrint('$tag: Started listening, waiting for audio...');
           } else if (state == 'stop') {
             session.isListening = false;
-            sendToClient(session, {
-              'type': 'listen',
-              'state': 'stop',
-              'session_id': session.sessionId,
-            });
+            debugPrint(
+              '$tag: Stopped listening, processing ${session.audioFrames.length} frames',
+            );
             // Process accumulated audio
             await processClientAudio(session);
           } else if (state == 'detect') {
@@ -483,10 +729,7 @@ void _onStart(ServiceInstance service) async {
             final text = json['text'] as String?;
             if (text != null && text.isNotEmpty) {
               // Send STT message (echo the text)
-              sendToClient(session, {
-                'type': 'stt',
-                'text': text,
-              });
+              sendToClient(session, {'type': 'stt', 'text': text});
 
               final memories = await retrieveMemories(text);
               await generateAndSpeak(session, text, memories);
@@ -496,11 +739,9 @@ void _onStart(ServiceInstance service) async {
 
         case 'abort':
           session.isListening = false;
-          session.audioBuffer.clear();
-          sendToClient(session, {
-            'type': 'abort',
-            'session_id': session.sessionId,
-          });
+          session.clearAudio();
+          // Don't echo back abort
+          debugPrint('$tag: Aborted');
           break;
 
         case 'speak':
@@ -517,26 +758,18 @@ void _onStart(ServiceInstance service) async {
   }
 
   // Create WebSocket handler
-  shelf.Handler wsHandler = webSocketHandler((WebSocketChannel webSocket, String? protocol) {
+  shelf.Handler wsHandler = webSocketHandler((
+    WebSocketChannel webSocket,
+    String? protocol,
+  ) {
     final sessionId = uuid.v4();
     final session = _ClientSession(webSocket: webSocket, sessionId: sessionId);
     sessions[webSocket] = session;
 
     debugPrint('$tag: New client connected, session: $sessionId');
 
-    // Send initial hello
-    sendToClient(session, {
-      'type': 'hello',
-      'session_id': sessionId,
-      'version': 1,
-      'transport': 'websocket',
-      'audio_params': {
-        'format': 'opus',
-        'sample_rate': 16000,
-        'channels': 1,
-        'frame_duration': 60,
-      },
-    });
+    // Don't send hello proactively - wait for device to send hello first
+    debugPrint('$tag: Client connected, waiting for hello...');
 
     webSocket.stream.listen(
       (message) => handleMessage(session, message),
@@ -556,20 +789,95 @@ void _onStart(ServiceInstance service) async {
       .addMiddleware(shelf.logRequests())
       .addMiddleware(_corsMiddleware())
       .addHandler((shelf.Request request) async {
+        final path = request.url.path;
+
+        // Handle WebSocket connections at /xiaozhi/v1/ or root
         if (request.headers['upgrade']?.toLowerCase() == 'websocket') {
-          return await wsHandler(request);
+          if (path == '' ||
+              path == '/' ||
+              path == 'xiaozhi/v1/' ||
+              path == 'xiaozhi/v1') {
+            return await wsHandler(request);
+          }
         }
 
-        if (request.url.path == '' || request.url.path == '/') {
+        // Status endpoint
+        if (path == '' || path == '/') {
           return shelf.Response.ok(
             jsonEncode({
               'status': 'running',
               'service': 'Xiaozhi AI Server',
+              'websocket': 'ws://IP:${ServerService.defaultPort}/xiaozhi/v1/',
               'port': ServerService.defaultPort,
               'clients': sessions.length,
               'configured': config != null,
               'timestamp': DateTime.now().toIso8601String(),
             }),
+            headers: {'content-type': 'application/json'},
+          );
+        }
+
+        // Health check
+        if (path == 'health' || path == 'xiaozhi/health') {
+          return shelf.Response.ok(
+            jsonEncode({'status': 'healthy'}),
+            headers: {'content-type': 'application/json'},
+          );
+        }
+
+        // OTA endpoint - returns server configuration to xiaozhi devices
+        if (path == 'xiaozhi/ota/' || path == 'xiaozhi/ota') {
+          // Get local IP address for WebSocket URL
+          String localIp = '0.0.0.0';
+          try {
+            final interfaces = await NetworkInterface.list(
+              type: InternetAddressType.IPv4,
+              includeLinkLocal: false,
+            );
+            for (final interface in interfaces) {
+              for (final addr in interface.addresses) {
+                if (!addr.isLoopback && addr.address.startsWith('192.168')) {
+                  localIp = addr.address;
+                  break;
+                }
+              }
+              if (localIp != '0.0.0.0') break;
+            }
+            // Fallback to first non-loopback
+            if (localIp == '0.0.0.0') {
+              for (final interface in interfaces) {
+                for (final addr in interface.addresses) {
+                  if (!addr.isLoopback) {
+                    localIp = addr.address;
+                    break;
+                  }
+                }
+                if (localIp != '0.0.0.0') break;
+              }
+            }
+          } catch (e) {
+            debugPrint('$tag: Error getting local IP: $e');
+          }
+
+          final now = DateTime.now();
+          final response = {
+            'server_time': {
+              'timestamp': now.millisecondsSinceEpoch,
+              'timezone_offset': now.timeZoneOffset.inMinutes,
+            },
+            'firmware': {'version': '1.0.0', 'url': ''},
+            'websocket': {
+              'url': 'ws://$localIp:${ServerService.defaultPort}/xiaozhi/v1/',
+              'token': 'test-token',
+            },
+          };
+
+          debugPrint(
+            '$tag: OTA request - returning websocket: ws://$localIp:${ServerService.defaultPort}/xiaozhi/v1/',
+          );
+
+          return shelf.Response.ok(
+            jsonEncode(response),
             headers: {'content-type': 'application/json'},
           );
         }
@@ -585,7 +893,9 @@ void _onStart(ServiceInstance service) async {
       ServerService.defaultPort,
     );
 
-    debugPrint('$tag: Server running on ws://${httpServer.address.address}:${httpServer.port}');
+    debugPrint(
+      '$tag: Server running on ws://${httpServer.address.address}:${httpServer.port}',
+    );
 
     if (service is AndroidServiceInstance) {
       service.setForegroundNotificationInfo(

@@ -196,7 +196,12 @@ class _SettingsScreenState extends State<SettingsScreen>
             fontWeight: FontWeight.w500,
             fontSize: 16,
           ),
-          tabs: const [Tab(text: '通用'), Tab(text: 'Dify配置'), Tab(text: '小智服务'), Tab(text: 'AI服务器')],
+          tabs: const [
+            Tab(text: '通用'),
+            Tab(text: 'Dify配置'),
+            Tab(text: '小智服务'),
+            Tab(text: 'AI服务器'),
+          ],
         ),
       ),
     );
@@ -1370,14 +1375,17 @@ class _SettingsScreenState extends State<SettingsScreen>
                                 height: 12,
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
-                                  color: serverProvider.isServerRunning
-                                      ? Colors.green
-                                      : Colors.grey,
+                                  color:
+                                      serverProvider.isServerRunning
+                                          ? Colors.green
+                                          : Colors.grey,
                                 ),
                               ),
                               const SizedBox(width: 12),
                               Text(
-                                serverProvider.isServerRunning ? '서버 실행 중' : '서버 중지됨',
+                                serverProvider.isServerRunning
+                                    ? '서버 실행 중'
+                                    : '서버 중지됨',
                                 style: const TextStyle(
                                   fontSize: 16,
                                   fontWeight: FontWeight.w500,
@@ -1386,19 +1394,21 @@ class _SettingsScreenState extends State<SettingsScreen>
                             ],
                           ),
                           ElevatedButton(
-                            onPressed: serverProvider.isConfigured
-                                ? () async {
-                                    if (serverProvider.isServerRunning) {
-                                      await serverProvider.stopServer();
-                                    } else {
-                                      await serverProvider.startServer();
+                            onPressed:
+                                serverProvider.isConfigured
+                                    ? () async {
+                                      if (serverProvider.isServerRunning) {
+                                        await serverProvider.stopServer();
+                                      } else {
+                                        await serverProvider.startServer();
+                                      }
                                     }
-                                  }
-                                : null,
+                                    : null,
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: serverProvider.isServerRunning
-                                  ? Colors.red
-                                  : Colors.green,
+                              backgroundColor:
+                                  serverProvider.isServerRunning
+                                      ? Colors.red
+                                      : Colors.green,
                               foregroundColor: Colors.white,
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 20,
@@ -1410,7 +1420,9 @@ class _SettingsScreenState extends State<SettingsScreen>
                             ),
                             child: Text(
                               serverProvider.isServerRunning ? '중지' : '시작',
-                              style: const TextStyle(fontWeight: FontWeight.w600),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
                         ],
@@ -1433,7 +1445,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   const Text(
-                                    'xiaozhi 연결 주소:',
+                                    'OTA 주소 (펌웨어에 설정):',
                                     style: TextStyle(
                                       fontSize: 12,
                                       color: Colors.black54,
@@ -1441,12 +1453,39 @@ class _SettingsScreenState extends State<SettingsScreen>
                                   ),
                                   const SizedBox(height: 4),
                                   SelectableText(
-                                    'ws://$ip:8000',
+                                    'http://$ip:8000/xiaozhi/ota/',
                                     style: TextStyle(
-                                      fontSize: 16,
+                                      fontSize: 14,
                                       fontWeight: FontWeight.w600,
                                       color: Colors.blue.shade700,
                                       fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  const Text(
+                                    'WebSocket 주소 (자동 연결):',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.black54,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  SelectableText(
+                                    'ws://$ip:8000/xiaozhi/v1/',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.blue.shade700,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Text(
+                                    '* cloudflared 터널을 통해 OTA 주소를 외부에 노출하세요',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade600,
+                                      fontStyle: FontStyle.italic,
                                     ),
                                   ),
                                 ],
@@ -1480,7 +1519,8 @@ class _SettingsScreenState extends State<SettingsScreen>
                       _buildApiKeyField(
                         initialValue: config?.groqApiKey ?? '',
                         hintText: 'Groq API Key 입력',
-                        onSaved: (value) => serverProvider.updateGroqApiKey(value),
+                        onSaved:
+                            (value) => serverProvider.updateGroqApiKey(value),
                       ),
                       const SizedBox(height: 16),
                       const Text(
@@ -1492,15 +1532,17 @@ class _SettingsScreenState extends State<SettingsScreen>
                       ),
                       const SizedBox(height: 8),
                       _buildDropdown(
-                        value: config?.llmModel ?? 'llama-3.3-70b-versatile',
+                        value: config?.llmModel ?? 'openai/gpt-oss-20b',
                         items: const [
+                          'openai/gpt-oss-20b',
                           'llama-3.3-70b-versatile',
                           'llama-3.1-8b-instant',
                           'mixtral-8x7b-32768',
                           'gemma2-9b-it',
                         ],
                         onChanged: (value) {
-                          if (value != null) serverProvider.updateLlmModel(value);
+                          if (value != null)
+                            serverProvider.updateLlmModel(value);
                         },
                       ),
                       const SizedBox(height: 16),
@@ -1520,7 +1562,8 @@ class _SettingsScreenState extends State<SettingsScreen>
                           'distil-whisper-large-v3-en',
                         ],
                         onChanged: (value) {
-                          if (value != null) serverProvider.updateSttModel(value);
+                          if (value != null)
+                            serverProvider.updateSttModel(value);
                         },
                       ),
                     ],
@@ -1548,7 +1591,9 @@ class _SettingsScreenState extends State<SettingsScreen>
                       _buildApiKeyField(
                         initialValue: config?.typecastApiKey ?? '',
                         hintText: 'Typecast API Key 입력',
-                        onSaved: (value) => serverProvider.updateTypecastApiKey(value),
+                        onSaved:
+                            (value) =>
+                                serverProvider.updateTypecastApiKey(value),
                       ),
                       const SizedBox(height: 16),
                       const Text(
@@ -1562,7 +1607,8 @@ class _SettingsScreenState extends State<SettingsScreen>
                       _buildTextField(
                         initialValue: config?.ttsVoiceId ?? 'default',
                         hintText: 'Voice ID 입력',
-                        onChanged: (value) => serverProvider.updateTtsVoiceId(value),
+                        onChanged:
+                            (value) => serverProvider.updateTtsVoiceId(value),
                       ),
                     ],
                   ),
@@ -1589,7 +1635,8 @@ class _SettingsScreenState extends State<SettingsScreen>
                       _buildApiKeyField(
                         initialValue: config?.mem0ApiKey ?? '',
                         hintText: 'mem0 API Key (선택사항)',
-                        onSaved: (value) => serverProvider.updateMem0ApiKey(value),
+                        onSaved:
+                            (value) => serverProvider.updateMem0ApiKey(value),
                       ),
                     ],
                   ),
@@ -1622,7 +1669,9 @@ class _SettingsScreenState extends State<SettingsScreen>
                             contentPadding: const EdgeInsets.all(16),
                             border: InputBorder.none,
                           ),
-                          onChanged: (value) => serverProvider.updateSystemPrompt(value),
+                          onChanged:
+                              (value) =>
+                                  serverProvider.updateSystemPrompt(value),
                         ),
                       ),
                     ],
@@ -1730,12 +1779,10 @@ class _SettingsScreenState extends State<SettingsScreen>
         value: items.contains(value) ? value : items.first,
         isExpanded: true,
         underline: const SizedBox(),
-        items: items.map((item) {
-          return DropdownMenuItem(
-            value: item,
-            child: Text(item),
-          );
-        }).toList(),
+        items:
+            items.map((item) {
+              return DropdownMenuItem(value: item, child: Text(item));
+            }).toList(),
         onChanged: onChanged,
       ),
     );

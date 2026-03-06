@@ -59,32 +59,26 @@ class ServerConfigProvider extends ChangeNotifier {
     }
   }
 
+  /// Create default config if none exists
+  ServerConfig _getOrCreateConfig() {
+    return _config ?? ServerConfig(groqApiKey: '');
+  }
+
   /// Update individual fields
   Future<void> updateGroqApiKey(String apiKey) async {
-    final newConfig = (_config ?? ServerConfig(
-      groqApiKey: '',
-      typecastApiKey: '',
-      mem0ApiKey: '',
-    )).copyWith(groqApiKey: apiKey);
-    await saveConfig(newConfig);
+    await saveConfig(_getOrCreateConfig().copyWith(groqApiKey: apiKey));
   }
 
   Future<void> updateTypecastApiKey(String apiKey) async {
-    final newConfig = (_config ?? ServerConfig(
-      groqApiKey: '',
-      typecastApiKey: '',
-      mem0ApiKey: '',
-    )).copyWith(typecastApiKey: apiKey);
-    await saveConfig(newConfig);
+    await saveConfig(_getOrCreateConfig().copyWith(typecastApiKey: apiKey));
+  }
+
+  Future<void> updateOpenaiApiKey(String apiKey) async {
+    await saveConfig(_getOrCreateConfig().copyWith(openaiApiKey: apiKey));
   }
 
   Future<void> updateMem0ApiKey(String apiKey) async {
-    final newConfig = (_config ?? ServerConfig(
-      groqApiKey: '',
-      typecastApiKey: '',
-      mem0ApiKey: '',
-    )).copyWith(mem0ApiKey: apiKey);
-    await saveConfig(newConfig);
+    await saveConfig(_getOrCreateConfig().copyWith(mem0ApiKey: apiKey));
   }
 
   Future<void> updateLlmModel(String model) async {
@@ -95,6 +89,10 @@ class ServerConfigProvider extends ChangeNotifier {
   Future<void> updateSttModel(String model) async {
     if (_config == null) return;
     await saveConfig(_config!.copyWith(sttModel: model));
+  }
+
+  Future<void> updateTtsProvider(String provider) async {
+    await saveConfig(_getOrCreateConfig().copyWith(ttsProvider: provider));
   }
 
   Future<void> updateTtsVoiceId(String voiceId) async {
